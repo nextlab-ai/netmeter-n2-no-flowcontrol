@@ -1,0 +1,30 @@
+From: minmax <minmax@archempc>
+Date: Sun, 11 May 2026
+Subject: [PATCH] net: macb: disable flow control advertisement for rp1-gem
+
+Remove MAC_ASYM_PAUSE from mac_capabilities so the PHY does not
+advertise asymmetric pause frames during autonegotiation. This
+prevents TX pause frames from being negotiated on Raspberry Pi 5
+(raspberrypi,rp1-gem), which was causing interference with network
+performance testing.
+
+Tested on: Raspberry Pi 5 (BCM2712), kernel 6.12.87-v8-16k-rpi-2712
+---
+ drivers/net/ethernet/cadence/macb_main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/cadence/macb_main.c b/drivers/net/ethernet/cadence/macb_main.c
+index 728f55265..ad4bf4e69 100644
+--- a/drivers/net/ethernet/cadence/macb_main.c
++++ b/drivers/net/ethernet/cadence/macb_main.c
+@@ -980,7 +980,7 @@ static int macb_mii_probe(struct net_device *dev)
+ 		bp->phylink_config.get_fixed_state = macb_get_pcs_fixed_state;
+ 	}
+
+-	bp->phylink_config.mac_capabilities = MAC_ASYM_PAUSE |
++	bp->phylink_config.mac_capabilities =
+ 		MAC_10 | MAC_100;
+
+ 	__set_bit(PHY_INTERFACE_MODE_MII,
+--
+2.43.0
