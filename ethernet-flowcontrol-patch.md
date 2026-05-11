@@ -338,6 +338,104 @@ Wi-Fi, Bluetooth 등 모든 기능이 즉시 복원됩니다.
 
 ---
 
+## 대안 방법 검토
+
+흐름제어를 드라이버 수정 없이 완화하는 방법들과 한계를 정리합니다.
+
+### 방법 1: RX 링 버퍼 증가
+
+NIC 하드웨어가 수신 패킷을 임시 보관하는 링 버퍼를 최대값으로 늘립니다.
+버퍼가 차는 빈도를 줄여 pause frame 발생을 억제합니다.
+
+```bash
+# 현재 설정 확인
+sudo ethtool -g eth0
+# Pre-set maximums RX: 4096 / Current RX: 512 (RPi5 기본값)
+
+# 즉시 적용 (재부팅 후 초기화)
+sudo ethtool -G eth0 rx 4096 tx 4096
+```
+
+**영구 적용 (systemd 서비스):**
+```bash
+sudo tee /etc/systemd/system/eth-ring-buffer.service <<EOF
+[Unit]
+Description=Set eth0 ring buffer size
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ethtool -G eth0 rx 4096 tx 4096
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl enable --now eth-ring-buffer.service
+```
+
+### 방법 2: 커널 소켓 버퍼 튜닝
+
+소켓 수신 버퍼가 작으면 커널이 패킷을 빨리 소화하지 못해
+링 버퍼 포화를 가속시킵니다. 소켓 버퍼를 128MB로 확장합니다.
+
+```bash
+sudo tee /etc/sysctl.d/99-network-performance.conf <<EOF
+net.core.rmem_max     = 134217728
+net.core.rmem_default = 134217728
+net.core.wmem_max     = 134217728
+net.core.wmem_default = 134217728
+net.ipv4.tcp_rmem = 4096 131072 134217728
+net.ipv4.tcp_wmem = 4096 131072 134217728
+net.ipv4.tcp_moderate_rcvbuf = 1
+EOF
+sudo sysctl -p /etc/sysctl.d/99-network-performance.conf
+```
+
+### 버퍼 구조와 흐름
+
+```
+[NIC 하드웨어]              [커널]             [애플리케이션]
+  RX 링 버퍼      →    소켓 수신 버퍼    →     iperf3 등
+  (최대 4096개)        (최대 128MB)
+       ↑                     ↑
+  여기가 차면           여기가 차면
+  pause frame 전송      링 버퍼가 차기 시작
+```
+
+두 버퍼를 모두 늘려야 효과가 있습니다.
+링 버퍼만 늘려도 소켓 버퍼가 작으면 역류가 발생합니다.
+
+### 900Mbps 지속 측정에서의 한계
+
+1Gbps 링크에서 900Mbps 지속 부하 시 패킷 처리 요구량:
+
+```
+900Mbps ÷ (1500byte × 8bit) = 약 75,000 패킷/초
+패킷 1개당 처리 허용 시간 = 약 13 마이크로초
+
+링 버퍼 최대(4096개) 기준 여유 시간:
+4096개 ÷ 75,000 PPS = 약 55ms
+```
+
+55ms 안에 CPU가 버퍼를 지속적으로 소화해야 합니다.
+스케줄러 지연, 인터럽트 처리, 메모리 복사 등으로
+**근거리 최고속 부하에서는 결국 버퍼가 포화됩니다.**
+
+### 방법별 효과 비교
+
+| 방법 | 순간 burst | 500Mbps 지속 | 900Mbps 지속 |
+|------|-----------|-------------|-------------|
+| RX 링 버퍼 증가 | ✅ 효과 있음 | 🔶 어느 정도 | ❌ 결국 포화 |
+| 소켓 버퍼 튜닝 | ✅ 효과 있음 | 🔶 어느 정도 | ❌ 링 버퍼 포화 못 막음 |
+| 상대 장비 flow control off | ✅ | ✅ | ✅ (상대 장비 설정 필요) |
+| **macb 드라이버 수정 (적용됨)** | ✅ | ✅ | ✅ 완전 차단 |
+
+**결론:** 1Gbps 링크에서 900Mbps 수준의 지속 성능 측정이 목적이라면
+버퍼 튜닝만으로는 신뢰할 수 없습니다. 드라이버 수정이 유일한 근본 해결책입니다.
+
+---
+
 ## 검증 결과
 
 ```
